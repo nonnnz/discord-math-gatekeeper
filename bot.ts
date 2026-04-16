@@ -8,7 +8,15 @@ import {
   ComponentType,
   TextChannel,
   MessageFlags,
+  SlashCommandBuilder,
+  REST,
+  Routes,
+  ChannelType,
 } from "discord.js";
+import {
+  joinVoiceChannel,
+  getVoiceConnection,
+} from "@discordjs/voice";
 
 // create a new Client instance
 const client = new Client({
@@ -25,8 +33,102 @@ const TARGET_VOICE_CHANNEL_ID = process.env.TARGET_VOICE_CHANNEL_ID;
 const ASK_CHANNEL_ID = process.env.ASK_CHANNEL_ID;
 
 // listen for the client to be ready
-client.once(Events.ClientReady, (c) => {
+client.once(Events.ClientReady, async (c) => {
   console.log(`Ready! Logged in as ${c.user.tag}`);
+
+  // Register slash commands
+  const commands = [
+    new SlashCommandBuilder()
+      .setName("join")
+      .setDescription("Joins a voice channel")
+      .addStringOption((option) =>
+        option
+          .setName("room_id")
+          .setDescription("The ID of the voice channel to join")
+          .setRequired(true)
+      ),
+    new SlashCommandBuilder()
+      .setName("leave")
+      .setDescription("Leaves the voice channel"),
+  ].map((command) => command.toJSON());
+
+  const rest = new REST({ version: "10" }).setToken(
+    process.env.DISCORD_TOKEN as string
+  );
+
+  try {
+    console.log("Started refreshing application (/) commands.");
+    await rest.put(Routes.applicationCommands(c.user.id), {
+      body: commands,
+    });
+    console.log("Successfully reloaded application (/) commands.");
+  } catch (error) {
+    console.error("Error refreshing commands:", error);
+  }
+});
+
+client.on(Events.InteractionCreate, async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+
+  const { commandName, guildId, guild } = interaction;
+
+  if (commandName === "join") {
+    const roomId = interaction.options.getString("room_id", true);
+
+    if (!guild) {
+      await interaction.reply({
+        content: "This command can only be used in a server! 🏢",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    try {
+      const channel = await guild.channels.fetch(roomId);
+
+      if (!channel || channel.type !== ChannelType.GuildVoice) {
+        await interaction.reply({
+          content: "Yo, that ain't a valid voice channel ID! 🎤❌",
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+
+      joinVoiceChannel({
+        channelId: channel.id,
+        guildId: guild.id,
+        adapterCreator: guild.voiceAdapterCreator,
+      });
+
+      await interaction.reply({
+        content: `Bet. Joining <#${channel.id}> now! 🚀`,
+        flags: MessageFlags.Ephemeral,
+      });
+    } catch (error) {
+      console.error("Error joining voice channel:", error);
+      await interaction.reply({
+        content: "Bruh, I couldn't join that channel. Check my perms! 🔒",
+        flags: MessageFlags.Ephemeral,
+      });
+    }
+  } else if (commandName === "leave") {
+    if (!guildId) return;
+
+    const connection = getVoiceConnection(guildId);
+
+    if (connection) {
+      connection.destroy();
+      await interaction.reply({
+        content: "I'm out! Peace ✌️",
+        flags: MessageFlags.Ephemeral,
+      });
+    } else {
+      await interaction.reply({
+        content: "I'm not even in a voice channel, fam. 🤨",
+        flags: MessageFlags.Ephemeral,
+      });
+    }
+  }
 });
 
 client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
@@ -69,93 +171,115 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
       return row;
     };
 
+    let sentMessage;
+    // Try DM first
     try {
-      const channel = (await client.channels.fetch(
-        ASK_CHANNEL_ID as string
-      )) as TextChannel;
-
-      if (!channel) {
-        console.error("Ask channel not found!");
-        return;
-      }
-
-      const sentMessage = await channel.send({
+      sentMessage = await member.send({
         content: getGreeting(member.id, question),
         components: [buildActionRow(options)],
       });
+    } catch (dmError) {
+      console.log(
+        `Could not DM user ${member.user.tag}, falling back to channel.`
+      );
+      // Fallback to channel
+      try {
+        const channel = (await client.channels.fetch(
+          ASK_CHANNEL_ID as string
+        )) as TextChannel;
 
-      const collector = sentMessage.createMessageComponentCollector({
-        componentType: ComponentType.Button,
-        time: 60000, // 60 seconds
-      });
-
-      collector.on("collect", async (i) => {
-        if (i.user.id !== member.id) {
-          await i.reply({
-            content: "Yo hands off! 🚫 This ain't for you, scrub. 😤",
-            flags: MessageFlags.Ephemeral,
-          });
+        if (!channel) {
+          console.error("Ask channel not found!");
           return;
         }
 
-        const selectedValue = parseInt(i.customId.split("_")[1]!);
-
-        if (selectedValue === answer) {
-          await i.reply({
-            content: getSuccessMessage(),
-            flags: MessageFlags.Ephemeral,
-          });
-
-          try {
-            // Unmute/Undeafen might be nice but just moving is required
-            await member.voice.setChannel(TARGET_VOICE_CHANNEL_ID as string);
-            collector.stop("success");
-          } catch (error) {
-            console.error("Failed to move user:", error);
-            await i.followUp({
-              content:
-                "Bruh 💀 I tried to move you but Discord is hating. No perms. 🔒",
-              flags: MessageFlags.Ephemeral,
-            });
-          }
-        } else {
-          // WRONG ANSWER
-          const joke = getJoke();
-
-          await i.reply({
-            content: `LMAO WRONG ❌. ${joke} cope harder. Try this one: 👇`,
-            flags: MessageFlags.Ephemeral,
-          });
-
-          // Re-generate problem
-          const newProb = generateMathProblem();
-          question = newProb.question;
-          answer = newProb.answer;
-          options = generateOptions(answer);
-
-          await sentMessage.edit({
-            content: getGreeting(member.id, question),
-            components: [buildActionRow(options)],
-          });
-          // Collector continues running (time is not reset)
-        }
-      });
-
-      collector.on("end", (collected, reason) => {
-        if (reason === "success") {
-          sentMessage.delete().catch(console.error);
-        } else {
-          sentMessage
-            .edit({
-              content: getTimeoutMessage(member.id),
-              components: [],
-            })
-            .catch(console.error);
-        }
-      });
-    } catch (error) {
-      console.error("Error sending verification message:", error);
+        sentMessage = await channel.send({
+          content: `${getGreeting(
+            member.id,
+            question
+          )} \n*(Psst, open your DMs for privacy next time! 🔒)*`,
+          components: [buildActionRow(options)],
+        });
+      } catch (channelError) {
+        console.error(
+          "Error sending verification message to channel:",
+          channelError
+        );
+        return;
+      }
     }
+
+    // Common collector for both DM and Channel messages
+    const collector = sentMessage.createMessageComponentCollector({
+      componentType: ComponentType.Button,
+      time: 60000, // 60 seconds
+    });
+
+    collector.on("collect", async (i) => {
+      // For DMs, i.user.id check is redundant but safe.
+      if (i.user.id !== member.id) {
+        await i.reply({
+          content: "Yo hands off! 🚫 This ain't for you, scrub. 😤",
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+
+      const selectedValue = parseInt(i.customId.split("_")[1]!);
+
+      if (selectedValue === answer) {
+        await i.reply({
+          content: getSuccessMessage(),
+          flags: MessageFlags.Ephemeral,
+        });
+
+        try {
+          // Unmute/Undeafen might be nice but just moving is required
+          await member.voice.setChannel(TARGET_VOICE_CHANNEL_ID as string);
+          collector.stop("success");
+        } catch (error) {
+          console.error("Failed to move user:", error);
+          await i.followUp({
+            content:
+              "Bruh 💀 I tried to move you but Discord is hating. No perms. 🔒",
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+      } else {
+        // WRONG ANSWER
+        const joke = getJoke();
+
+        await i.reply({
+          content: `LMAO WRONG ❌. ${joke} cope harder. Try this one: 👇`,
+          flags: MessageFlags.Ephemeral,
+        });
+
+        // Re-generate problem
+        const newProb = generateMathProblem();
+        question = newProb.question;
+        answer = newProb.answer;
+        options = generateOptions(answer);
+
+        await sentMessage.edit({
+          content: getGreeting(member.id, question),
+          components: [buildActionRow(options)],
+        });
+        // Collector continues running (time is not reset)
+      }
+    });
+
+    collector.on("end", (collected, reason) => {
+      if (reason === "success") {
+        sentMessage.delete().catch(console.error);
+      } else {
+        sentMessage
+          .edit({
+            content: getTimeoutMessage(member.id),
+            components: [],
+          })
+          .catch(console.error);
+      }
+    });
   }
 });
 
