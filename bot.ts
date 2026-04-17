@@ -84,20 +84,44 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     try {
-      const channel = await guild.channels.fetch(roomId);
+      // First try to fetch as a global channel to see if it even exists
+      const channel = await client.channels.fetch(roomId).catch(() => null);
 
-      if (!channel || channel.type !== ChannelType.GuildVoice) {
+      if (!channel) {
         await interaction.reply({
-          content: "Yo, that ain't a valid voice channel ID! 🎤❌",
+          content: "Yo, I couldn't find that channel anywhere! 🔍❌",
           flags: MessageFlags.Ephemeral,
         });
         return;
       }
 
-      joinVoiceChannel({
+      // Check if it's in the current guild
+      if ('guild' in channel && channel.guild.id !== guild.id) {
+        await interaction.reply({
+          content: `Bruh, that channel is in **${(channel as any).guild.name}**, not here! 🏢❌`,
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+
+      if (channel.type !== ChannelType.GuildVoice) {
+        await interaction.reply({
+          content: "Yo, that ain't a voice channel! 🎤❌",
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+
+      const connection = joinVoiceChannel({
         channelId: channel.id,
         guildId: guild.id,
         adapterCreator: guild.voiceAdapterCreator,
+      });
+
+      // CRITICAL: Handle connection errors to prevent bot crash
+      connection.on("error", (error) => {
+        console.error("Voice Connection Error:", error);
+        // Connection will often try to recover, but we log it for debugging
       });
 
       await interaction.reply({
@@ -105,7 +129,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         flags: MessageFlags.Ephemeral,
       });
     } catch (error) {
-      console.error("Error joining voice channel:", error);
+      console.error("Error in join command:", error);
       await interaction.reply({
         content: "Bruh, I couldn't join that channel. Check my perms! 🔒",
         flags: MessageFlags.Ephemeral,

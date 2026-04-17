@@ -41,9 +41,45 @@ ASK_CHANNEL_ID=text_channel_id_for_questions
 
 ### 4. Run the Bot
 
+**Development:**
 ```bash
-bun run bot.ts
+bun run dev
 ```
+
+**Production:**
+```bash
+bun run start
+```
+
+## 🚀 Production Best Practices
+
+For production, it is recommended to use a process manager to ensure the bot restarts automatically if it crashes.
+
+### Option 1: Using PM2
+1. Install PM2: `npm install -g pm2`
+2. Start the bot:
+   ```bash
+   pm2 start bun --name "math-bot" -- run start
+   ```
+
+### Option 2: Using Systemd (Linux)
+Create a service file at `/etc/systemd/system/math-bot.service`:
+```ini
+[Unit]
+Description=Troll Math Bot
+After=network.target
+
+[Service]
+Type=simple
+User=your-user
+WorkingDirectory=/path/to/DiscordBot-1
+ExecStart=/usr/local/bin/bun run start
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+Then run: `systemctl enable --now math-bot`
 
 ## 🎮 How it Works
 
