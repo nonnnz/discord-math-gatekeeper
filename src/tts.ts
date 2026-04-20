@@ -1,9 +1,14 @@
 import { GoogleGenAI } from "@google/genai";
 import { withModelFallback } from "./model-fallback";
 
-export const TTS_MODELS = [
-  "gemini-3.1-flash-tts-preview",
-  "gemini-2.5-flash-preview-tts",
+/**
+ * TTS model fallback chain with per-model voice config.
+ * Fenrir is only available in newer (3.1) models.
+ * Aoede is universally supported across model generations.
+ */
+export const TTS_MODELS: { model: string; voiceName: string }[] = [
+  { model: "gemini-3.1-flash-tts-preview",  voiceName: "Fenrir" },
+  { model: "gemini-2.5-flash-preview-tts",  voiceName: "Aoede"  },
 ];
 
 export async function generateTTSAudio(
@@ -18,7 +23,12 @@ export async function generateTTSAudio(
   const ai = new GoogleGenAI({ apiKey });
   const fullPrompt = `${personaPrompt}\n\n#### TRANSCRIPT\n${text}`;
 
-  return await withModelFallback(TTS_MODELS, async (model) => {
+  // Build a flat list of model strings for the fallback utility
+  const modelNames = TTS_MODELS.map((m) => m.model);
+
+  return await withModelFallback(modelNames, async (model) => {
+    const voiceName = TTS_MODELS.find((m) => m.model === model)!.voiceName;
+
     const response = await ai.models.generateContent({
       model,
       contents: [{ parts: [{ text: fullPrompt }] }],
@@ -26,7 +36,7 @@ export async function generateTTSAudio(
         responseModalities: ["AUDIO"],
         speechConfig: {
           voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: "Fenrir" },
+            prebuiltVoiceConfig: { voiceName },
           },
         },
       },
@@ -39,7 +49,7 @@ export async function generateTTSAudio(
       const reason = candidate?.finishReason || "UNKNOWN";
       const message = candidate?.finishMessage || "No additional info";
       throw new Error(
-        `No audio data returned from Gemini TTS. Reason: ${reason} (${message})`,
+        `No audio data returned from ${model} (voice: ${voiceName}). Reason: ${reason} (${message})`,
       );
     }
 
