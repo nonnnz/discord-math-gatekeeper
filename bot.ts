@@ -13,10 +13,9 @@ import {
   Routes,
   ChannelType,
 } from "discord.js";
-import {
-  joinVoiceChannel,
-  getVoiceConnection,
-} from "@discordjs/voice";
+import { joinVoiceChannel, getVoiceConnection } from "@discordjs/voice";
+import { generateTTSAudio } from "./src/tts";
+import { playPCMBuffer } from "./src/voice-player";
 
 // create a new Client instance
 const client = new Client({
@@ -32,6 +31,35 @@ const SOURCE_VOICE_CHANNEL_ID = process.env.SOURCE_VOICE_CHANNEL_ID;
 const TARGET_VOICE_CHANNEL_ID = process.env.TARGET_VOICE_CHANNEL_ID;
 const ASK_CHANNEL_ID = process.env.ASK_CHANNEL_ID;
 
+const DEFAULT_TTS_PROMPT = `# AUDIO PROFILE: นิว (์New)
+## "The Rage Gamer"
+
+## THE SCENE: The Gaming Den
+It is 2:00 AM in a dimly lit, cluttered bedroom in Bangkok. Empty snack bags and
+energy drink cans cover the desk. The monitor glow is the only light in the room.
+Gong has been grinding the same game for 8 hours straight and just got killed by
+a cheater — again. He is seething. His hands are shaking with rage. Every loss is
+someone else's fault. He is one bad round away from rage-quitting forever.
+
+### DIRECTOR'S NOTES
+Style:
+* Pure, unfiltered rage. Every word drips with frustration and contempt.
+* Heavy Thai profanity and gaming slang used constantly and naturally.
+* Shouts unpredictably mid-sentence. Nothing is ever his fault.
+* Sounds like he genuinely wants to throw his keyboard across the room.
+
+Pace: Explosive and erratic. Rapid-fire delivery that suddenly peaks into a
+shout, then drops into a bitter, exhausted mutter before spiking again.
+No breathing room. No composure.
+
+Accent: Central Thai, raw Bangkok street accent. Completely unpolished.
+
+### SAMPLE CONTEXT
+Gong is an unemployed man in his 20s whose entire life is video games. He has
+infinite time to be online and infinite rage to burn. He speaks Thai exclusively.`;
+
+const guildPersonaPrompts = new Map<string, string>();
+
 // listen for the client to be ready
 client.once(Events.ClientReady, async (c) => {
   console.log(`Ready! Logged in as ${c.user.tag}`);
@@ -45,23 +73,58 @@ client.once(Events.ClientReady, async (c) => {
         option
           .setName("room_id")
           .setDescription("The ID of the voice channel to join")
-          .setRequired(true)
+          .setRequired(true),
       ),
     new SlashCommandBuilder()
       .setName("leave")
       .setDescription("Leaves the voice channel"),
+    new SlashCommandBuilder()
+      .setName("say")
+      .setDescription("Speak text in the current voice channel")
+      .addStringOption((option) =>
+        option.setName("text").setDescription("What to say").setRequired(true),
+      )
+      .addStringOption((option) =>
+        option
+          .setName("prompt")
+          .setDescription("Override persona prompt (permanently saved)")
+          .setRequired(false),
+      ),
+    new SlashCommandBuilder()
+      .setName("setprompt")
+      .setDescription("Set the TTS persona prompt for this server")
+      .addStringOption((option) =>
+        option
+          .setName("prompt")
+          .setDescription("The persona prompt")
+          .setRequired(true),
+      ),
+    new SlashCommandBuilder()
+      .setName("reset")
+      .setDescription("Reset the TTS persona prompt back to default"),
   ].map((command) => command.toJSON());
 
   const rest = new REST({ version: "10" }).setToken(
-    process.env.DISCORD_TOKEN as string
+    process.env.DISCORD_TOKEN as string,
   );
 
   try {
     console.log("Started refreshing application (/) commands.");
-    await rest.put(Routes.applicationCommands(c.user.id), {
-      body: commands,
-    });
-    console.log("Successfully reloaded application (/) commands.");
+    const guildId = process.env.GUILD_ID;
+
+    if (guildId) {
+      await rest.put(Routes.applicationGuildCommands(c.user.id, guildId), {
+        body: commands,
+      });
+      console.log(`Successfully reloaded Guild (/) commands for ${guildId}.`);
+    } else {
+      await rest.put(Routes.applicationCommands(c.user.id), {
+        body: commands,
+      });
+      console.log(
+        "Successfully reloaded Global (/) commands. (Note: May take up to 1 hour to propagate)",
+      );
+    }
   } catch (error) {
     console.error("Error refreshing commands:", error);
   }
@@ -96,7 +159,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       // Check if it's in the current guild
-      if ('guild' in channel && channel.guild.id !== guild.id) {
+      if ("guild" in channel && channel.guild.id !== guild.id) {
         await interaction.reply({
           content: `Bruh, that channel is in **${(channel as any).guild.name}**, not here! 🏢❌`,
           flags: MessageFlags.Ephemeral,
@@ -152,6 +215,72 @@ client.on(Events.InteractionCreate, async (interaction) => {
         flags: MessageFlags.Ephemeral,
       });
     }
+  } else if (commandName === "say") {
+    if (!guildId || !guild) return;
+
+    const connection = getVoiceConnection(guildId);
+    if (!connection) {
+      await interaction.reply({
+        content: "I ain't even in a voice channel! Use `/join` first. 🎤❌",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    let text = interaction.options.getString("text", true);
+    const overridePrompt = interaction.options.getString("prompt");
+
+    // Add character limit trim
+    const MAX_LENGTH = 100;
+    let trimmed = false;
+    if (text.length > MAX_LENGTH) {
+      text = text.substring(0, MAX_LENGTH) + "...";
+      trimmed = true;
+    }
+
+    if (overridePrompt) {
+      guildPersonaPrompts.set(guildId, overridePrompt);
+    }
+
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    try {
+      const prompt = guildPersonaPrompts.get(guildId) ?? DEFAULT_TTS_PROMPT;
+      const audioBuffer = await generateTTSAudio(text, prompt);
+
+      await playPCMBuffer(connection, audioBuffer);
+
+      let replyContent = "🔊 Speaking... 🗣️";
+      if (overridePrompt) replyContent += " (prompt updated)";
+      if (trimmed)
+        replyContent += " \n*(Note: Text was trimmed to 500 characters)*";
+
+      await interaction.editReply({ content: replyContent });
+    } catch (error) {
+      console.error("Error in say command:", error);
+      await interaction.editReply({
+        content: "Bruh, I couldn't speak. Something's cooked! 😵‍💫",
+      });
+    }
+  } else if (commandName === "setprompt") {
+    if (!guildId) return;
+
+    const newPrompt = interaction.options.getString("prompt", true);
+    guildPersonaPrompts.set(guildId, newPrompt);
+
+    await interaction.reply({
+      content: "✅ Prompt updated! Ready to talk some trash. 😈",
+      flags: MessageFlags.Ephemeral,
+    });
+  } else if (commandName === "reset") {
+    if (!guildId) return;
+
+    guildPersonaPrompts.delete(guildId);
+
+    await interaction.reply({
+      content: "🔄 Prompt reset to default. Back to being a gamer! 🎮",
+      flags: MessageFlags.Ephemeral,
+    });
   }
 });
 
@@ -189,7 +318,7 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
           new ButtonBuilder()
             .setCustomId(`math_${opt}`) // Pass the answer value directly
             .setEmoji(emojis[opt - 1]!)
-            .setStyle(ButtonStyle.Primary)
+            .setStyle(ButtonStyle.Primary),
         );
       });
       return row;
@@ -204,12 +333,12 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
       });
     } catch (dmError) {
       console.log(
-        `Could not DM user ${member.user.tag}, falling back to channel.`
+        `Could not DM user ${member.user.tag}, falling back to channel.`,
       );
       // Fallback to channel
       try {
         const channel = (await client.channels.fetch(
-          ASK_CHANNEL_ID as string
+          ASK_CHANNEL_ID as string,
         )) as TextChannel;
 
         if (!channel) {
@@ -220,14 +349,14 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
         sentMessage = await channel.send({
           content: `${getGreeting(
             member.id,
-            question
+            question,
           )} \n*(Psst, open your DMs for privacy next time! 🔒)*`,
           components: [buildActionRow(options)],
         });
       } catch (channelError) {
         console.error(
           "Error sending verification message to channel:",
-          channelError
+          channelError,
         );
         return;
       }
