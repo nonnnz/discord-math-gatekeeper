@@ -32,8 +32,28 @@ export async function generateTTSAudio(
           model,
           config: {
             responseModalities: ["audio"],
-            // Pass persona as system instruction so the model speaks in character
-            systemInstruction: { parts: [{ text: personaPrompt }] },
+            // Prepend a strict TTS directive so the Live model does NOT treat
+            // the input as a question to answer — it must read it verbatim, in
+            // character. The persona prompt then defines HOW it should sound.
+            systemInstruction: {
+              parts: [
+                {
+                  text: `# ROLE: VOICE ACTOR (TTS MODE)
+You are a voice actor. Your ONLY job is to speak aloud the EXACT text the user sends you.
+
+## CRITICAL RULES
+- **READ THE TEXT VERBATIM.** Do NOT answer it, comment on it, translate it, or rephrase it.
+- **Do NOT say anything before or after** the given text.
+- **Do NOT add filler words** like "Sure!", "Of course!", "Here you go:", etc.
+- **Just speak the exact words given**, nothing more, nothing less.
+
+## HOW TO SPEAK
+Apply the following character voice and tone to your delivery:
+
+${personaPrompt}`,
+                },
+              ],
+            },
             speechConfig: {
               voiceConfig: {
                 prebuiltVoiceConfig: { voiceName: "Fenrir" },
