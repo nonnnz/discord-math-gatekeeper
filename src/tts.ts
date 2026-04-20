@@ -1,16 +1,13 @@
 import { GoogleGenAI } from "@google/genai";
-import { withModelFallback } from "./model-fallback";
 
 /**
- * TTS model fallback chain with per-model voice config.
- * Fenrir is only available in newer (3.1) models.
- * Aoede is universally supported across model generations.
+ * Generates audio using the Gemini Live API (WebSocket).
+ * The Live API model (gemini-3.1-flash-live-preview) has a much higher quota
+ * than the dedicated TTS models which are capped at 10 req/day on free tier.
+ *
+ * Audio format: Raw PCM, 16-bit little-endian, mono, 24kHz — compatible with
+ * the existing voice-player.ts which handles ffmpeg resampling to 48kHz stereo.
  */
-export const TTS_MODELS: { model: string; voiceName: string }[] = [
-  { model: "gemini-3.1-flash-tts-preview",  voiceName: "Fenrir" },
-  { model: "gemini-2.5-flash-preview-tts",  voiceName: "Aoede"  },
-];
-
 export async function generateTTSAudio(
   text: string,
   personaPrompt: string,
@@ -21,38 +18,97 @@ export async function generateTTSAudio(
   }
 
   const ai = new GoogleGenAI({ apiKey });
-  const fullPrompt = `${personaPrompt}\n\n#### TRANSCRIPT\n${text}`;
+  const model = "gemini-3.1-flash-live-preview";
 
-  // Build a flat list of model strings for the fallback utility
-  const modelNames = TTS_MODELS.map((m) => m.model);
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let isResolved = false;
 
-  return await withModelFallback(modelNames, async (model) => {
-    const voiceName = TTS_MODELS.find((m) => m.model === model)!.voiceName;
+    console.log(`[TTS] Connecting to Live API (${model})...`);
 
-    const response = await ai.models.generateContent({
-      model,
-      contents: [{ parts: [{ text: fullPrompt }] }],
-      config: {
-        responseModalities: ["AUDIO"],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName },
+    (async () => {
+      try {
+        const session = await ai.live.connect({
+          model,
+          config: {
+            responseModalities: ["audio"],
+            // Pass persona as system instruction so the model speaks in character
+            systemInstruction: { parts: [{ text: personaPrompt }] },
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName: "Fenrir" },
+              },
+            },
           },
-        },
-      },
-    });
+          callbacks: {
+            onmessage: (response: any) => {
+              const content = response.serverContent;
 
-    const candidate = response.candidates?.[0];
-    const data = candidate?.content?.parts?.[0]?.inlineData?.data;
+              // Accumulate audio chunks — a single event can have multiple parts
+              const parts = content?.modelTurn?.parts;
+              if (parts) {
+                for (const part of parts) {
+                  if (part.inlineData?.data) {
+                    chunks.push(Buffer.from(part.inlineData.data, "base64"));
+                  }
+                }
+              }
 
-    if (!data) {
-      const reason = candidate?.finishReason || "UNKNOWN";
-      const message = candidate?.finishMessage || "No additional info";
-      throw new Error(
-        `No audio data returned from ${model} (voice: ${voiceName}). Reason: ${reason} (${message})`,
-      );
-    }
+              // Resolve when model signals end of its turn
+              if (content?.turnComplete) {
+                if (!isResolved) {
+                  console.log(`[TTS] Turn complete. Received ${chunks.length} audio chunks.`);
+                  isResolved = true;
+                  session.close();
+                  resolve(Buffer.concat(chunks));
+                }
+              }
+            },
+            onerror: (error: any) => {
+              console.error(`[TTS] Live API Error:`, error);
+              if (!isResolved) {
+                isResolved = true;
+                session.close();
+                reject(new Error(error?.message || String(error)));
+              }
+            },
+            onclose: () => {
+              if (!isResolved) {
+                isResolved = true;
+                if (chunks.length > 0) {
+                  resolve(Buffer.concat(chunks));
+                } else {
+                  reject(new Error("Connection closed with no audio received."));
+                }
+              }
+            },
+          },
+        });
 
-    return Buffer.from(data, "base64");
+        // Per SKILL.md: Use sendRealtimeInput({ text }) for all real-time text input.
+        // sendClientContent is ONLY for seeding initial history context, not active turns.
+        console.log(`[TTS] Sending text via sendRealtimeInput...`);
+        session.sendRealtimeInput({ text });
+
+      } catch (err: any) {
+        if (!isResolved) {
+          isResolved = true;
+          reject(err);
+        }
+      }
+    })();
+
+    // Safety timeout: resolve with partial audio or reject after 30s
+    setTimeout(() => {
+      if (!isResolved) {
+        console.warn(`[TTS] Request timed out after 30s.`);
+        isResolved = true;
+        if (chunks.length > 0) {
+          resolve(Buffer.concat(chunks));
+        } else {
+          reject(new Error("TTS request timed out with no audio received."));
+        }
+      }
+    }, 30_000);
   });
 }
