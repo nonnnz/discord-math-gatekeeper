@@ -231,7 +231,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const overridePrompt = interaction.options.getString("prompt");
 
     // Add character limit trim
-    const MAX_LENGTH = 100;
+    const MAX_LENGTH = 510;
     let trimmed = false;
     if (text.length > MAX_LENGTH) {
       text = text.substring(0, MAX_LENGTH) + "...";
