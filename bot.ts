@@ -31,34 +31,23 @@ const SOURCE_VOICE_CHANNEL_ID = process.env.SOURCE_VOICE_CHANNEL_ID;
 const TARGET_VOICE_CHANNEL_ID = process.env.TARGET_VOICE_CHANNEL_ID;
 const ASK_CHANNEL_ID = process.env.ASK_CHANNEL_ID;
 
-const DEFAULT_TTS_PROMPT = `# AUDIO PROFILE: นิว (์New)
-## "The Rage Gamer"
+const MOOD_PROMPTS = {
+  angry: `# VOICE: Angry Rager
+Speak with pure rage. Shout unpredictably. Heavy gaming slang and Thai profanity.
+VERBATIM ONLY: Read the text exactly. No intro, no outro, no filler words.`,
 
-## THE SCENE: The Gaming Den
-It is 2:00 AM in a dimly lit, cluttered bedroom in Bangkok. Empty snack bags and
-energy drink cans cover the desk. The monitor glow is the only light in the room.
-Gong has been grinding the same game for 8 hours straight and just got killed by
-a cheater — again. He is seething. His hands are shaking with rage. Every loss is
-someone else's fault. He is one bad round away from rage-quitting forever.
+  crying: `# VOICE: Crying/Sad
+Speak with sadness, sniffing, and despair. Pathetic and miserable tone.
+VERBATIM ONLY: Read the text exactly. No intro, no outro, no filler words.`,
 
-### DIRECTOR'S NOTES
-Style:
-* Pure, unfiltered rage. Every word drips with frustration and contempt.
-* Heavy Thai profanity and gaming slang used constantly and naturally.
-* Shouts unpredictably mid-sentence. Nothing is ever his fault.
-* Sounds like he genuinely wants to throw his keyboard across the room.
+  excited: `# VOICE: Hyped and Energetic
+Speak with high energy, enthusiasm, and excitement. Fast-paced and animated.
+VERBATIM ONLY: Read the text exactly. No intro, no outro, no filler words.`,
 
-Pace: Explosive and erratic. Rapid-fire delivery that suddenly peaks into a
-shout, then drops into a bitter, exhausted mutter before spiking again.
-No breathing room. No composure.
-
-Accent: Central Thai, raw Bangkok street accent. Completely unpolished.
-
-### SAMPLE CONTEXT
-Gong is an unemployed man in his 20s whose entire life is video games. He has
-infinite time to be online and infinite rage to burn. He speaks Thai exclusively.`;
-
-const guildPersonaPrompts = new Map<string, string>();
+  podcast: `# VOICE: Professional Podcaster
+Speak clearly, professionally, and engagingly. Warm and conversational.
+VERBATIM ONLY: Read the text exactly. No intro, no outro, no filler words.`,
+} as const;
 
 // listen for the client to be ready
 client.once(Events.ClientReady, async (c) => {
@@ -86,22 +75,16 @@ client.once(Events.ClientReady, async (c) => {
       )
       .addStringOption((option) =>
         option
-          .setName("prompt")
-          .setDescription("Override persona prompt (permanently saved)")
-          .setRequired(false),
+          .setName("mood")
+          .setDescription("Voice mood/preset")
+          .setRequired(false)
+          .addChoices(
+            { name: "Angry (default)", value: "angry" },
+            { name: "Crying", value: "crying" },
+            { name: "Excited", value: "excited" },
+            { name: "Podcast", value: "podcast" },
+          ),
       ),
-    new SlashCommandBuilder()
-      .setName("setprompt")
-      .setDescription("Set the TTS persona prompt for this server")
-      .addStringOption((option) =>
-        option
-          .setName("prompt")
-          .setDescription("The persona prompt")
-          .setRequired(true),
-      ),
-    new SlashCommandBuilder()
-      .setName("reset")
-      .setDescription("Reset the TTS persona prompt back to default"),
   ].map((command) => command.toJSON());
 
   const rest = new REST({ version: "10" }).setToken(
@@ -228,7 +211,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     let text = interaction.options.getString("text", true);
-    const overridePrompt = interaction.options.getString("prompt");
+    const mood = (interaction.options.getString("mood") as keyof typeof MOOD_PROMPTS) ?? "angry";
 
     // Add character limit trim
     const MAX_LENGTH = 510;
@@ -238,20 +221,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
       trimmed = true;
     }
 
-    if (overridePrompt) {
-      guildPersonaPrompts.set(guildId, overridePrompt);
-    }
-
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     try {
-      const prompt = guildPersonaPrompts.get(guildId) ?? DEFAULT_TTS_PROMPT;
+      const prompt = MOOD_PROMPTS[mood];
       const audioBuffer = await generateTTSAudio(text, prompt);
 
       await playPCMBuffer(connection, audioBuffer);
 
-      let replyContent = "🔊 Speaking... 🗣️";
-      if (overridePrompt) replyContent += " (prompt updated)";
+      let replyContent = `🔊 Speaking... (${mood}) 🗣️`;
       if (trimmed)
         replyContent += " \n*(Note: Text was trimmed to 500 characters)*";
 
@@ -262,25 +240,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         content: "Bruh, I couldn't speak. Something's cooked! 😵‍💫",
       });
     }
-  } else if (commandName === "setprompt") {
-    if (!guildId) return;
-
-    const newPrompt = interaction.options.getString("prompt", true);
-    guildPersonaPrompts.set(guildId, newPrompt);
-
-    await interaction.reply({
-      content: "✅ Prompt updated! Ready to talk some trash. 😈",
-      flags: MessageFlags.Ephemeral,
-    });
-  } else if (commandName === "reset") {
-    if (!guildId) return;
-
-    guildPersonaPrompts.delete(guildId);
-
-    await interaction.reply({
-      content: "🔄 Prompt reset to default. Back to being a gamer! 🎮",
-      flags: MessageFlags.Ephemeral,
-    });
   }
 });
 
